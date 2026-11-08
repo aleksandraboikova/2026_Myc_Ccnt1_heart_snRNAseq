@@ -1,5 +1,4 @@
-# A transient modified mRNA encoding Myc and Cyclin T1 improves cardiac 1
-function after myocardial injury
+# A transient modified mRNA encoding Myc and Cyclin T1 improves cardiac function after myocardial injury
 
 Myc is an evolutionarily conserved transcription factor that is necessary for the restoration of tissues in multiple regenerative species. The adult mammalian heart lacks regenerative capacity and cardiomyocytes fail to divide following damage-induced signalling. Transgenic expression of Myc and Cyclin T1 can drive substantial adult cardiomyocyte proliferation to replace lost cardiomyocytes. Here, using transgenic models and a prototypical mRNA therapeutic we show that Myc and Cyclin T1 require transient induction for cardiomyocyte proliferation that leads to myocardial repair and functional recovery after myocardial infarction in mice. This research provides a strategy to translate Myc-Cyclin T1 co-expression for cardiac regeneration to address serious unmet needs in the treatment of cardiovascular disease.
 
