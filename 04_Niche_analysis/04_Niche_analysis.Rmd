@@ -1,0 +1,359 @@
+---
+title: "Cell-cell_communication_snRNAseq_analysis_reference"
+author: "Sasha Boikova"
+date: "2026-11-09"
+output: html_document
+---
+
+```{r Document knit settings}
+library (knitr)
+opts_chunk$set(echo=T, cache = T, cache.lazy=F, error = F, warnings = F, eval=T, fig.align='center', message = FALSE, warning = FALSE)
+options(stringsAsFactors = FALSE)
+knitr::opts_knit$set(root.dir = "C:/Users/")
+```
+
+```{r Load libs, install from BiocManager}
+
+library(dplyr)
+library(remotes)
+library(reticulate)
+library(future)
+library(stringr)
+library(grid)
+library(tidyverse)
+
+library(Seurat)
+library(SeuratWrappers)
+library(sctransform)
+library(glmGamPoi)
+
+library(patchwork)
+library(ggplot2)
+library(reshape2)
+library(viridis)
+library(RColorBrewer)
+
+library(nichenetr)
+library(CellChat)
+
+
+```
+
+```{r NicheNet DB URLs used}
+
+lr_network <- readRDS(url("https://zenodo.org/record/7074291/files/lr_network_mouse_21122021.rds"))
+ligand_target_matrix <- readRDS(url("https://zenodo.org/record/7074291/files/ligand_target_matrix_nsga2r_final_mouse.rds"))
+weighted_networks <- readRDS(url("https://zenodo.org/record/7074291/files/weighted_networks_nsga2r_final_mouse.rds"))
+  
+```
+
+```{r }
+
+DimPlot(nuclei) # load the a dataset object (adult, MI, juvenile)
+Idents(nuclei) <- "annot"
+
+nuclei@active.ident <- factor(nuclei@active.ident, levels = c( "cardiomyocytes", "cardiomyocytes.atria", "endothelial", "lymphatic.endothelial", "endocardial", "epicardial",  "fibroblasts",  "pericytes", "cardiac.glial", "myeloid",  "lymphocytes", "adipocytes"))
+
+table(nuclei@meta.data$annot, nuclei@meta.data$orig.ident) 
+nuclei@meta.data$celltype_aggregate = paste(nuclei@meta.data$annot, nuclei@meta.data$genotype,sep = "_") 
+DimPlot(nuclei, group.by = "celltype_aggregate")
+
+DefaultAssay(nuclei) <- "SCT"
+
+```
+
+```{r NN}
+
+# NicheNet analysis is adapted from vignettes https://github.com/saeyslab/nichenetr/tree/master/vignettes  
+
+lr_network = lr_network %>% dplyr::rename(ligand = from, receptor = to) %>% distinct(ligand, receptor)
+head(lr_network)
+  
+celltype_id = "celltype_aggregate" 
+
+nuclei <- SetIdent(nuclei, value = nuclei[[celltype_id, drop=TRUE]])
+
+niches = list(
+  "Myc" = list(
+    "sender" = c("endocardial_Cre", "endothelial_Cre", "lymphatic.endothelial_Cre", "epicardial_Cre", "pericytes_Cre",   "cardiac.glial_Cre", "fibroblasts_Cre", "adipocytes_Cre", "lymphocytes_Cre", "myeloid_Cre"),
+    "receiver" = c("cardiomyocytes_Cre")),
+  "WT" = list(
+    "sender" = c("endocardial_wt", "endothelial_wt", "lymphatic.endothelial_wt", "epicardial_wt", "pericytes_wt",   "cardiac.glial_wt", "fibroblasts_wt", "adipocytes_wt", "lymphocytes_wt", "myeloid_wt"),
+    "receiver" = c("cardiomyocytes_wt"))
+  )
+
+
+assay_oi = "SCT"
+nuclei = alias_to_symbol_seurat(nuclei, organism = "mouse")
+
+nuclei <- PrepSCTFindMarkers(nuclei)
+DE_sender = calculate_niche_de(seurat_obj = nuclei %>% subset(features = lr_network$ligand %>% unique()), niches = niches, type = "sender", assay_oi = assay_oi) 
+DE_receiver = calculate_niche_de(seurat_obj = nuclei %>% subset(features = lr_network$receptor %>% unique()), niches = niches, type = "receiver", assay_oi = assay_oi)  
+DE_sender = DE_sender %>% mutate(avg_log2FC = ifelse(avg_log2FC == Inf, max(avg_log2FC[is.finite(avg_log2FC)]), ifelse(avg_log2FC == -Inf, min(avg_log2FC[is.finite(avg_log2FC)]), avg_log2FC)))
+DE_receiver = DE_receiver %>% mutate(avg_log2FC = ifelse(avg_log2FC == Inf, max(avg_log2FC[is.finite(avg_log2FC)]), ifelse(avg_log2FC == -Inf, min(avg_log2FC[is.finite(avg_log2FC)]), avg_log2FC)))
+                   
+expression_pct = 0.10
+DE_sender_processed = process_niche_de(DE_table = DE_sender, niches = niches, expression_pct = expression_pct, type = "sender")
+DE_receiver_processed = process_niche_de(DE_table = DE_receiver, niches = niches, expression_pct = expression_pct, type = "receiver")
+
+specificity_score_LR_pairs = "min_lfc"
+DE_sender_receiver = combine_sender_receiver_de(DE_sender_processed, DE_receiver_processed, lr_network, specificity_score = specificity_score_LR_pairs)
+lfc_cutoff = 0.25 
+specificity_score_targets = "min_lfc"
+
+
+DE_receiver_targets = calculate_niche_de_targets(seurat_obj = nuclei, niches = niches, lfc_cutoff = lfc_cutoff, expression_pct = expression_pct, assay_oi = assay_oi) 
+DE_receiver_processed_targets = process_receiver_target_de(DE_receiver_targets = DE_receiver_targets, niches = niches, expression_pct = expression_pct, specificity_score = specificity_score_targets)
+
+background = DE_receiver_processed_targets  %>% pull(target) %>% unique()
+geneset_niche1 = DE_receiver_processed_targets %>% filter(receiver == niches[[1]]$receiver & target_score >= lfc_cutoff & target_significant == 1 & target_present == 1) %>% pull(target) %>% unique()
+geneset_niche2 = DE_receiver_processed_targets %>% filter(receiver == niches[[2]]$receiver & target_score >= lfc_cutoff & target_significant == 1 & target_present == 1) %>% pull(target) %>% unique()
+  
+geneset_niche1 %>% setdiff(rownames(ligand_target_matrix))
+geneset_niche2 %>% setdiff(rownames(ligand_target_matrix))
+
+length(geneset_niche1)
+length(geneset_niche2)
+length(background)
+
+top_n_target = 250
+
+niche_geneset_list = list(
+  "Myc" = list(
+    "receiver" = niches[[1]]$receiver,
+    "geneset" = geneset_niche1,
+    "background" = background),
+  "WT" = list(
+    "receiver" = niches[[2]]$receiver,
+    "geneset" = geneset_niche2 ,
+    "background" = background)
+  )
+  
+ligand_activities_targets = get_ligand_activities_targets(niche_geneset_list = niche_geneset_list, ligand_target_matrix = ligand_target_matrix, top_n_target = top_n_target)
+
+features_oi = union(lr_network$ligand, lr_network$receptor) %>% union(ligand_activities_targets$target) %>% setdiff(NA)
+  
+dotplot = suppressWarnings(Seurat::DotPlot(nuclei %>% subset(idents = niches %>% unlist() %>% unique()), features = features_oi, assay = assay_oi))
+exprs_tbl = dotplot$data %>% as_tibble()
+exprs_tbl = exprs_tbl %>% rename(celltype = id, gene = features.plot, expression = avg.exp, expression_scaled = avg.exp.scaled, fraction = pct.exp) %>%
+    mutate(fraction = fraction/100) %>% as_tibble() %>% select(celltype, gene, expression, expression_scaled, fraction) %>% distinct() %>% arrange(gene) %>% mutate(gene = as.character(gene))
+  
+exprs_tbl_ligand = exprs_tbl %>% filter(gene %in% lr_network$ligand) %>% rename(sender = celltype, ligand = gene, ligand_expression = expression, ligand_expression_scaled = expression_scaled, ligand_fraction = fraction) 
+exprs_tbl_receptor = exprs_tbl %>% filter(gene %in% lr_network$receptor) %>% rename(receiver = celltype, receptor = gene, receptor_expression = expression, receptor_expression_scaled = expression_scaled, receptor_fraction = fraction)
+exprs_tbl_target = exprs_tbl %>% filter(gene %in% ligand_activities_targets$target) %>% rename(receiver = celltype, target = gene, target_expression = expression, target_expression_scaled = expression_scaled, target_fraction = fraction)
+
+exprs_tbl_ligand = exprs_tbl_ligand %>%  mutate(scaled_ligand_expression_scaled = scale_quantile_adapted(ligand_expression_scaled)) %>% mutate(ligand_fraction_adapted = ligand_fraction) %>% mutate_cond(ligand_fraction >= expression_pct, ligand_fraction_adapted = expression_pct)  %>% mutate(scaled_ligand_fraction_adapted = scale_quantile_adapted(ligand_fraction_adapted))
+
+exprs_tbl_receptor = exprs_tbl_receptor %>% mutate(scaled_receptor_expression_scaled = scale_quantile_adapted(receptor_expression_scaled))  %>% mutate(receptor_fraction_adapted = receptor_fraction) %>% mutate_cond(receptor_fraction >= expression_pct, receptor_fraction_adapted = expression_pct)  %>% mutate(scaled_receptor_fraction_adapted = scale_quantile_adapted(receptor_fraction_adapted))
+
+exprs_sender_receiver = lr_network %>% 
+  inner_join(exprs_tbl_ligand, by = c("ligand")) %>% 
+  inner_join(exprs_tbl_receptor, by = c("receptor")) %>% inner_join(DE_sender_receiver %>% distinct(niche, sender, receiver))
+  
+ligand_scaled_receptor_expression_fraction_df = exprs_sender_receiver %>% group_by(ligand, receiver) %>% mutate(rank_receptor_expression = dense_rank(receptor_expression), rank_receptor_fraction  = dense_rank(receptor_fraction)) %>% mutate(ligand_scaled_receptor_expression_fraction = 0.5*( (rank_receptor_fraction / max(rank_receptor_fraction)) + ((rank_receptor_expression / max(rank_receptor_expression))) ) )  %>% distinct(ligand, receptor, receiver, ligand_scaled_receptor_expression_fraction) %>% distinct() %>% ungroup() 
+
+
+
+prioritizing_weights = c("scaled_ligand_score" = 5,
+                         "scaled_ligand_expression_scaled" = 1,
+                         "ligand_fraction" = 1,
+                         "scaled_ligand_score_spatial" = 0, 
+                         "scaled_receptor_score" = 0.5,
+                         "scaled_receptor_expression_scaled" = 0.5,
+                          "receptor_fraction" = 1, 
+                         "ligand_scaled_receptor_expression_fraction" = 1,
+                         "scaled_receptor_score_spatial" = 0,
+                         "scaled_activity" = 0,
+                         "scaled_activity_normalized" = 1)
+
+
+
+include_spatial_info_sender = FALSE 
+include_spatial_info_receiver = FALSE 
+
+if(include_spatial_info_sender == FALSE & include_spatial_info_receiver == FALSE){
+    spatial_info = tibble(celltype_region_oi = NA, celltype_other_region = NA) %>% mutate(niche =  niches %>% names() %>% head(1), celltype_type = "sender")
+} 
+
+  sender_spatial_DE_processed = get_non_spatial_de(niches = niches, spatial_info = spatial_info, type = "sender", lr_network = lr_network)
+  sender_spatial_DE_processed = sender_spatial_DE_processed %>% mutate(scaled_ligand_score_spatial = scale_quantile_adapted(ligand_score_spatial))  
+
+  receiver_spatial_DE_processed = get_non_spatial_de(niches = niches, spatial_info = spatial_info, type = "receiver", lr_network = lr_network)
+  receiver_spatial_DE_processed = receiver_spatial_DE_processed %>% mutate(scaled_receptor_score_spatial = scale_quantile_adapted(receptor_score_spatial))
+
+output = list(DE_sender_receiver = DE_sender_receiver, ligand_scaled_receptor_expression_fraction_df = ligand_scaled_receptor_expression_fraction_df, sender_spatial_DE_processed = sender_spatial_DE_processed, receiver_spatial_DE_processed = receiver_spatial_DE_processed,
+         ligand_activities_targets = ligand_activities_targets, DE_receiver_processed_targets = DE_receiver_processed_targets, exprs_tbl_ligand = exprs_tbl_ligand,  exprs_tbl_receptor = exprs_tbl_receptor, exprs_tbl_target = exprs_tbl_target)
+prioritization_tables = get_prioritization_tables(output, prioritizing_weights)
+
+
+prioritization_tables$prioritization_tbl_ligand_receptor %>% filter(receiver == niches[[1]]$receiver) %>% head(10)
+prioritization_tables$prioritization_tbl_ligand_target %>% filter(receiver == niches[[1]]$receiver) %>% head(10)
+prioritization_tables$prioritization_tbl_ligand_receptor %>% filter(receiver == niches[[2]]$receiver) %>% head(10)
+prioritization_tables$prioritization_tbl_ligand_target %>% filter(receiver == niches[[2]]$receiver) %>% head(10)
+
+
+```
+
+```{r NN visuals, fig.height=15, fig.width=28}
+
+top_ligand_niche_df = prioritization_tables$prioritization_tbl_ligand_receptor %>% select(niche, sender, receiver, ligand, receptor, prioritization_score) %>% group_by(ligand) %>% top_n(1, prioritization_score) %>% ungroup() %>% select(ligand, receptor, niche) %>% rename(top_niche = niche)
+top_ligand_receptor_niche_df = prioritization_tables$prioritization_tbl_ligand_receptor %>% select(niche, sender, receiver, ligand, receptor, prioritization_score) %>% group_by(ligand, receptor) %>% top_n(1, prioritization_score) %>% ungroup() %>% select(ligand, receptor, niche) %>% rename(top_niche = niche)
+
+ligand_prioritized_tbl_oi = prioritization_tables$prioritization_tbl_ligand_receptor %>% select(niche, sender, receiver, ligand, prioritization_score) %>% group_by(ligand, niche) %>% top_n(1, prioritization_score) %>% ungroup() %>% distinct() %>% inner_join(top_ligand_niche_df) %>% filter(niche == top_niche) %>% group_by(niche) %>% top_n(50, prioritization_score) %>% ungroup() #
+
+receiver_oi = "cardiomyocytes_Cre" 
+
+filtered_ligands = ligand_prioritized_tbl_oi %>% filter(receiver == receiver_oi) %>% pull(ligand) %>% unique()
+
+prioritized_tbl_oi = prioritization_tables$prioritization_tbl_ligand_receptor %>% filter(ligand %in% filtered_ligands) %>% select(niche, sender, receiver, ligand,  receptor, ligand_receptor, prioritization_score) %>% distinct() %>% inner_join(top_ligand_receptor_niche_df) %>% group_by(ligand) %>% filter(receiver == receiver_oi) %>% top_n(2, prioritization_score) %>% ungroup() 
+
+lfc_plot = make_ligand_receptor_lfc_plot(receiver_oi, prioritized_tbl_oi, prioritization_tables$prioritization_tbl_ligand_receptor, plot_legend = FALSE, heights = NULL, widths = NULL)
+lfc_plot
+
+exprs_activity_target_plot = make_ligand_activity_target_exprs_plot(receiver_oi, prioritized_tbl_oi,  prioritization_tables$prioritization_tbl_ligand_receptor,  prioritization_tables$prioritization_tbl_ligand_target, output$exprs_tbl_ligand,  output$exprs_tbl_target, lfc_cutoff, ligand_target_matrix, plot_legend = FALSE, heights = NULL, widths = NULL)
+exprs_activity_target_plot$combined_plot
+
+filtered_ligands = ligand_prioritized_tbl_oi %>% filter(receiver == receiver_oi) %>% top_n(20, prioritization_score) %>% pull(ligand) %>% unique()
+
+prioritized_tbl_oi = prioritization_tables$prioritization_tbl_ligand_receptor %>% filter(ligand %in% filtered_ligands) %>% select(niche, sender, receiver, ligand,  receptor, ligand_receptor, prioritization_score) %>% distinct() %>% inner_join(top_ligand_receptor_niche_df) %>% group_by(ligand) %>% filter(receiver == receiver_oi) %>% top_n(2, prioritization_score) %>% ungroup() 
+
+exprs_activity_target_plot = make_ligand_activity_target_exprs_plot(receiver_oi, prioritized_tbl_oi,  prioritization_tables$prioritization_tbl_ligand_receptor,  prioritization_tables$prioritization_tbl_ligand_target, output$exprs_tbl_ligand,  output$exprs_tbl_target, lfc_cutoff, ligand_target_matrix, plot_legend = FALSE, heights = NULL, widths = NULL)
+exprs_activity_target_plot$combined_plot
+
+
+filtered_ligands = ligand_prioritized_tbl_oi %>% filter(receiver == receiver_oi) %>% top_n(15, prioritization_score) %>% pull(ligand) %>% unique()
+
+prioritized_tbl_oi = prioritization_tables$prioritization_tbl_ligand_receptor %>% filter(ligand %in% filtered_ligands) %>% select(niche, sender, receiver, ligand,  receptor, ligand_receptor, prioritization_score) %>% distinct() %>% inner_join(top_ligand_receptor_niche_df) %>% group_by(ligand) %>% filter(receiver == receiver_oi) %>% top_n(2, prioritization_score) %>% ungroup() 
+
+
+ligand_colors <- c( "cardiomyocytes" = "#DD3721", "cardiomyocytes.atria" = "#F0A6CF", "endothelial" = "#5082F5", "lymphatic.endothelial" = "#FFAF79", "endocardial" = "#262A81", "epicardial" = "#78DA46",  "fibroblasts" = "#F3E54E", "myofibroblasts" = "#E1CF80", "pericytes" = "#D0FB53", "cardiac.glial" = "#8D6CB6", "monocytes" = "#BB33B1",  "lymphocytes" = "#B5C7E3", "adipocytes" = "#8CE7E8" ) 
+target_colors <- c("LCMV-DE" = "#999999") 
+
+colors_sender = brewer.pal(n = prioritized_tbl_oi$sender %>% unique() %>% sort() %>% length(), name = 'Spectral') %>%
+magrittr::set_names(prioritized_tbl_oi$sender %>% unique() %>% sort())
+
+colors_receiver = c("red")  %>% magrittr::set_names(prioritized_tbl_oi$receiver %>% unique() %>% sort())
+
+circos_output = make_circos_lr(prioritized_tbl_oi, colors_sender, colors_receiver) + Legend()
+
+
+receiver_oi = "cardiomyocytes_wt"  
+filtered_ligands = ligand_prioritized_tbl_oi %>% filter(receiver == receiver_oi) %>% top_n(50, prioritization_score) %>% pull(ligand) %>% unique()
+
+prioritized_tbl_oi = prioritization_tables$prioritization_tbl_ligand_receptor %>% filter(ligand %in% filtered_ligands) %>% select(niche, sender, receiver, ligand,  receptor, ligand_receptor, prioritization_score) %>% distinct() %>% inner_join(top_ligand_receptor_niche_df) %>% group_by(ligand) %>% filter(receiver == receiver_oi) %>% top_n(2, prioritization_score) %>% ungroup() 
+
+lfc_plot = make_ligand_receptor_lfc_plot(receiver_oi, prioritized_tbl_oi, prioritization_tables$prioritization_tbl_ligand_receptor, plot_legend = FALSE, heights = NULL, widths = NULL)
+lfc_plot
+
+```
+
+
+```{r CellChat}
+
+# CellChat analysis adapted from vignette https://github.com/sqjin/CellChat/blob/master/tutorial/CellChat-vignette.html
+
+CellChatDB <- CellChatDB.mouse
+
+Idents(object = nuclei) <- "genotype"           #load a dataset object (adult, MI, juvenile)
+nuclei.wt <- subset(x = nuclei, idents = "wt")  # control genotype
+nuclei.Cre <-subset(x = nuclei, idents = "Cre") # Myc-Ccnt1 genotype
+
+Idents(object = nuclei.wt) <- "annot"
+Idents(object = nuclei.Cre) <- "annot"
+
+data.input.wt <- nuclei.wt[["RNA"]]@data
+labels.wt <- Idents(nuclei.wt)
+meta.wt <- data.frame(labels = labels.wt, row.names = names(labels.wt)) 
+cellChat.wt <- createCellChat(object = nuclei.wt, group.by = "ident", assay = "RNA")
+
+data.input.Cre <- nuclei.Cre[["RNA"]]@data
+labels.Cre <- Idents(nuclei.Cre)
+meta.Cre <- data.frame(labels = labels.Cre, row.names = names(labels.Cre)) 
+cellChat.Cre <- createCellChat(object = nuclei.Cre, group.by = "ident", assay = "RNA")
+
+CellChatDB.use <- CellChatDB 
+cellChat.wt@DB <- CellChatDB.use
+cellChat.Cre@DB <- CellChatDB.use
+
+options(future.globals.maxSize = 25000 * 1024^2)
+
+cellChat.wt <- subsetData(cellChat.wt) 
+cellChat.Cre <- subsetData(cellChat.Cre) 
+future::plan("multisession", workers = 4)
+
+cellChat.wt <- identifyOverExpressedGenes(cellChat.wt)
+cellChat.wt <- identifyOverExpressedInteractions(cellChat.wt)
+
+cellChat.Cre <- identifyOverExpressedGenes(cellChat.Cre)
+cellChat.Cre <- identifyOverExpressedInteractions(cellChat.Cre)
+
+cellChat.wt <- computeCommunProb(cellChat.wt, type = "triMean")
+cellChat.wt <- filterCommunication(cellChat.wt, min.cells = 10)
+
+cellChat.Cre <- computeCommunProb(cellChat.Cre, type = "triMean")
+cellChat.Cre <- filterCommunication(cellChat.Cre, min.cells = 10)
+
+saveRDS(cellChat.wt, file = "CellChat_v1_wt.RDS")
+saveRDS(cellChat.Cre, file = "CellChat_v1_Cre.RDS")
+
+
+cell.levels <- c("cardiomyocytes", "cardiomyocytes.atria", "endothelial", "lymphatic.endothelial", "endocardial", "epicardial",  "fibroblasts", "pericytes", "cardiac.glial", "myeloid",  "lymphocytes", "adipocytes")
+
+nuclei.wt$cellgroup <- Idents(nuclei.wt)
+nuclei.Cre$cellgroup <- Idents(nuclei.Cre)
+
+identity = data.frame(group = nuclei.wt$cellgroup, row.names = names(nuclei.wt$cellgroup))
+unique(identity$group)
+cellChat.wt <- addMeta(cellChat.wt, meta = identity, meta.name = "cell_type")
+levels(cellChat.wt@idents)
+
+identity = data.frame(group = nuclei.Cre$cellgroup, row.names = names(nuclei.Cre$cellgroup))
+unique(identity$group)
+cellChat.Cre <- addMeta(cellChat.Cre, meta = identity, meta.name = "cell_type")
+levels(cellChat.Cre@idents) 
+
+cellChat.wt <- setIdent(cellChat.wt, ident.use = "cell_type", levels = cell.levels)
+levels(cellChat.wt@idents)
+groupSize.wt <- as.numeric(table(cellChat.wt@idents))
+
+cellChat.Cre <- setIdent(cellChat.Cre, ident.use = "cell_type", levels = cell.levels)
+levels(cellChat.Cre@idents)
+groupSize.Cre <- as.numeric(table(cellChat.Cre@idents))
+
+
+cellChat.wt <- computeCommunProbPathway(cellChat.wt)
+cellChat.Cre <- computeCommunProbPathway(cellChat.Cre)
+cellChat.wt <- aggregateNet(cellChat.wt)
+cellChat.Cre <- aggregateNet(cellChat.Cre)
+cellChat.wt <- netAnalysis_computeCentrality(cellChat.wt, slot.name = "netP") 
+cellChat.Cre <- netAnalysis_computeCentrality(cellChat.Cre, slot.name = "netP") 
+groupSize.wt <- as.numeric(table(cellChat.wt@idents))
+groupSize.Cre <- as.numeric(table(cellChat.Cre@idents))
+
+netVisual_circle(cellChat.wt@net$count, vertex.weight = groupSize.wt, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+netVisual_circle(cellChat.Cre@net$count, vertex.weight = groupSize.Cre, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+
+cellChat.wt@meta$ident = factor(cellChat.wt@meta$ident, levels = c( "cardiomyocytes", "cardiomyocytes.atria", "endothelial", "lymphatic.endothelial", "endocardial", "epicardial",  "fibroblasts",  "pericytes", "cardiac.glial", "myeloid",  "lymphocytes", "adipocytes"))
+
+cellChat.Cre@meta$ident = factor(cellChat.Cre@meta$ident, levels = c( "cardiomyocytes", "cardiomyocytes.atria", "endothelial", "lymphatic.endothelial", "endocardial", "epicardial",  "fibroblasts",  "pericytes", "cardiac.glial", "myeloid",  "lymphocytes", "adipocytes"))
+
+object.list <- list( WT = cellChat.wt, Myc = cellChat.Cre)
+cellchat <- mergeCellChat(object.list, add.names = names(object.list))
+
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_diffInteraction(cellchat, weight.scale = T, vertex.label.color = "transparent") 
+netVisual_diffInteraction(cellchat, weight.scale = T, measure = "weight", vertex.label.color = "transparent") 
+netVisual_heatmap(cellchat) 
+netVisual_heatmap(cellchat, measure = "weight") 
+
+netVisual_bubble(cellChat.wt, sources.use = c(1, 3, 4, 5, 11,12), targets.use = c(1:12), remove.isolate = FALSE, signaling = c("IGF", "VEGF", "ANGPT", "NRG", "BMP"))
+netVisual_bubble(cellChat.Cre, sources.use = c(1, 3, 4, 5, 11, 12), targets.use = c(1:12), remove.isolate = FALSE, signaling = c("IGF", "VEGF", "ANGPT", "NRG", "BMP"))
+
+netVisual_chord_gene(cellChat.wt, sources.use = c(1, 3, 4, 5, 11,12), targets.use = c(1:12), signaling = c("IGF", "VEGF", "ANGPT", "NRG", "BMP"),  lab.cex = 1.5, small.gap = 2)
+netVisual_chord_gene(cellChat.Cre, sources.use = c(1, 3, 4, 5, 11,12), targets.use = c(1:12), signaling = c("IGF", "VEGF", "ANGPT", "NRG", "BMP"),  lab.cex = 1.5, small.gap = 2)
+
+pathways.show <- c("IGF", "VEGF", "ANGPT", "NRG", "BMP", "PTPRM")
+g1 <- netVisual_aggregate(cellChat.wt, signaling = pathways.show, layout = "chord")
+g2 <- netVisual_aggregate(cellChat.Cre, signaling = pathways.show, layout = "chord")
+
+```
