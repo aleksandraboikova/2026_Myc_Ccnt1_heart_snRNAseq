@@ -6,7 +6,7 @@ Mouse whole heart single-nucleus RNA sequencing data analysis included:
 
 1. Preprocessing of cellranger output filtered barcode matrices into Seurat objects (Seurat) followed by QC and doublet removal (DoubletFinder)
 2. Integration, clustering and annotation of cell populations
-3. Cardiomyocyte subset analysis - differential gene expression analysis, cell cycle scoring, gene list enrichment analysis (Enrichr), pseudotime trajectory inference (Monocle3)
+3. Cardiomyocyte subset analysis - differential gene expression analysis, cell cycle scoring, gene list enrichment analysis (clusterProfiler), pseudotime trajectory inference (Monocle3)
 4. Differential cell-cell communication analysis with NicheNet and CellChat
 
 Data availability:
