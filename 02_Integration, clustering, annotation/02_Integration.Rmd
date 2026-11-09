@@ -1,0 +1,232 @@
+---
+title: "02_Integration_snRNAseq_analysis_reference"
+author: "Sasha Boikova"
+date: "2026-11-09"
+output: html_document
+---
+
+```{r Document knit settings}
+library (knitr)
+opts_chunk$set(echo=T, cache = T, cache.lazy=F, error = F, warnings = F, eval=T, fig.align='center', message = FALSE, warning = FALSE)
+options(stringsAsFactors = FALSE)
+knitr::opts_knit$set(root.dir = "C:/Users/")
+```
+
+```{r Load libs, install from BiocManager}
+
+library(dplyr)
+library(remotes)
+library(reticulate)
+library(future)
+library(stringr)
+
+library(Seurat)
+library(SeuratWrappers)
+library(sctransform)
+library(glmGamPoi)
+
+library(patchwork)
+library(ggplot2)
+library(reshape2)
+library(viridis)
+library(RColorBrewer)
+library(ape)
+library(clustree)
+
+```
+
+
+```{r Integration}
+
+#Individual dataset integration Extended Fig.2 and Extended Fig.8 
+
+plan("multiprocess", workers = 4)
+options(future.globals.maxSize = 16000 * 1024^2)
+gc()
+
+nuclei.appended <- list(nuclei_1, nuclei_2, nuclei_3, nuclei_4, nuclei_5, nuclei_6) # load the individual sample objects per dataset and create a list as created in the step 01_preprocessing
+features <- SelectIntegrationFeatures(object.list = nuclei.appended, nfeatures = 3000, verbose = F)
+nuclei.appended <- PrepSCTIntegration(object.list = nuclei.appended, anchor.features = features, verbose = T)
+anchors <- FindIntegrationAnchors(object.list = nuclei.appended, dims = 1:30, anchor.features = features, normalization.method = "SCT", reduction = "rpca", verbose = T)
+
+plan("multiprocess", workers = 1) 
+gc()
+
+nuclei <- IntegrateData(anchorset = anchors, dims = 1:30, normalization.method = "SCT")
+nuclei <- RunPCA(nuclei, verbose = T)
+nuclei <- RunUMAP(nuclei, reduction = "pca", dims = 1:30, verbose = T)
+nuclei <- FindNeighbors(nuclei, reduction = "pca", dims = 1:30)
+nuclei <- FindClusters(nuclei, resolution = 0.25)
+
+DimPlot(nuclei, reduction = "umap", group.by = "orig.ident")
+View(nuclei)
+
+saveRDS(nuclei, file = "Dataset_integrated_nuclei.RDS") 
+
+```
+
+```{r Clustering assessment}
+
+#assess clustering resolution with clustree and choose a stable res parameter 
+resolution.range <- seq(from = 0.1, to = 1, by = 0.1)
+DefaultAssay(nuclei) <-  "integrated"
+Graphs(nuclei)
+Clustree <- Seurat::FindClusters(object = nuclei, resolution = resolution.range)
+clustree(Clustree, prefix = "integrated_snn_res.")
+
+# assess cluster tree for cluster merging 
+nuclei <- BuildClusterTree( object = nuclei, assay = "integrated.rpca", dims = 1:30, reorder = T)
+tree <- Tool(object = nuclei, slot = 'BuildClusterTree')
+ape_1 <- PlotClusterTree(object = tree, direction = "downwards")
+ape_1
+
+```
+
+```{r Annotation}
+
+# cluster cell type identity was initially  manually annotated based on reference markers for individual adult, MI, juvenile datasets :
+
+markers <- c("Pard6g", "Mmrn1", "Tll1", "Reln", "D5Ertd615e",                                                                                         # lymphatic endothelial cells
+             "Dgkb", "Acta2","Kcnab1","Itga8","Myh11","Tagln",                                                                                        # smooth muscle cells
+             "Myh6","Ttn","Ryr2","Tnnt2","Fhl2","Rcan2","Esrrg","Cpeb3","Grm1","Tpm1","Rbm20","Fgf13",                                                # ventricular cardiomyocytes
+             "Erbb4", "Ryr3","Kcnj3","Fgf12","Rgs6","Pam","Nppa","Myl4","Sln","Myl7",                                                                 # atrial cardiomyocytes
+             "Tm4sf1","Cytl1","Tmem108","Mctp1","Hmcn1","Npr3","Eng",                                                                                 # endocardial
+             "Cdh5","Pecam1","Vwf","Tek","Kdr","Flt1","Mgll","Aqp1","Cgnl1","Plcb1","Etl4","Cyyr1","Fabp4",                                           # endothelial
+             "Dnm3os","Abca8a","Meg3","Bmper","Nkain2","L3mbtl4","Cntfr","Igf1","C7","Col8a1","Pcdh9","Tenm3","Col1a1","Arhgap","Bicc1",              # fibroblasts
+             "Trpc3","Notch3","Abcc9","Pdgfrb","Rgs5","Nrxn1","Pde8b",                                                                                # pericytes
+             "Muc16","Wdr17","Tbce","Grip1","Rbfox1","Sulf1","Plxna4","Gpm6a","Rarres2","Igfbp5","Msln","Upk3b",                                      # epicardial
+             "Rbpj","Slc9a9","Mrc1","Runx1","F13a1","Pid1",                                                                                           # myeloid 
+             "Prkcb","Bank1","Ripor2","Ikzf3","Pax5","Skap1","Arhgap15","Grap2","Lef1",                                                               # lymphocytes
+             "Cadm2","Csmd1","Cdh19","Slc35f1","Scn7a",                                                                                               # cardiac glial 
+             "Scd1","Acaca","Cfd","Plin1","Car3","Tenm4","Acvr1c","Slc1a3","Prkar2b"                                                                  # adipocytes
+)
+
+DotPlot(nuclei, features = unique(markers), group.by = "seurat_clusters") + theme(axis.text.x = element_text(angle = 90, hjust=1))
+
+nuclei@meta.data$annot <- ""
+nuclei@meta.data$annot <- nuclei@meta.data$seurat_clusters
+nuclei@meta.data$annot <- as.character(nuclei@meta.data$annot)
+nuclei@meta.data$annot[nuclei@meta.data$annot == 0] <- "cardiomyocytes" # e.g. seurat_cluster 0 is cardiomyocytes based on the Myh6,Ttn,Ryr2,Tnnt2,Fhl2 marker expression, etc.
+
+DimPlot(nuclei, reduction = "umap", group.by = "annot", label = T)
+DotPlot(nuclei, features = unique(markers), group.by = "annot") + theme(axis.text.x = element_text(angle = 90, hjust=1)) + scale_color_viridis(direction = -1) 
+
+```
+
+```{r }
+
+#Dataset integration Main Fig.2
+
+DefaultAssay(object = nuclei) <- "RNA"       # adult dataset object
+DefaultAssay(object = MI_nuclei) <- "RNA"    # MI dataset object
+DefaultAssay(object = juv_nuclei) <- "RNA"   # juvenile dataset object
+
+nuclei[['integrated']] <- NULL
+MI_nuclei[['integrated']] <- NULL
+juv_nuclei[['integrated']] <- NULL
+
+MI_nuclei[['SCT']] <- NULL
+juv_nuclei[['SCT']] <- NULL
+nuclei[['SCT']] <- NULL
+
+View(nuclei)
+
+#split RNA assay
+
+nuclei <- SplitObject(object = nuclei, split.by = "orig.ident")
+MI_nuclei <- SplitObject(object = MI_nuclei, split.by = "orig.ident")
+juv_nuclei <- SplitObject(object = juv_nuclei, split.by = "orig.ident")
+
+nuclei.appended <- list(nuclei, MI_nuclei, juv_nuclei) 
+nuclei.appended <- unlist(nuclei.appended, recursive=FALSE)
+
+rm(nuclei, MI_nuclei, juv_nuclei)
+gc()
+
+nuclei <- merge(x= nuclei.appended[[1]], y = nuclei.appended[-1])
+
+nuclei[["RNA"]] <- split(nuclei[["RNA"]], f = nuclei$orig.ident)
+Layers(nuclei[["RNA"]])
+
+nuclei <- NormalizeData(nuclei, verbose = T)
+nuclei <- FindVariableFeatures(nuclei, verbose = T)
+nuclei <- ScaleData(nuclei, verbose = T)
+nuclei <- RunPCA(nuclei, verbose = T)
+gc()
+
+
+nuclei <- IntegrateLayers(object = nuclei, method = RPCAIntegration, orig.reduction = "pca", new.reduction = "integrated.rpca",  verbose = T) 
+
+nuclei <- FindNeighbors(nuclei, reduction = "integrated.rpca", dims = 1:30)
+nuclei <- FindClusters(nuclei, resolution = 0.5)
+nuclei <- RunUMAP(nuclei, reduction = "integrated.rpca", dims = 1:30, reduction.name = "umap.rpca", return.model = T, verbose = T)
+
+nuclei <- JoinLayers(nuclei)   # now that integration is complete, rejoin layers
+
+p1 <- DimPlot(
+  nuclei,
+  reduction = "umap.rpca",
+  group.by = "orig.ident"
+)
+
+p1
+
+saveRDS(nuclei, file = "ALL_nuclei_integrated_RNALayer.RDS")
+
+View(nuclei)
+
+```
+
+```{r 3D UMAP}
+
+library(plotly)
+
+Idents(nuclei) <- "annot"
+nuclei@active.ident <- factor(nuclei@active.ident, 
+                            levels=c("adipocytes", "cardiac.glial", "cardiomyocytes", "cardiomyocytes.atria", "endocardial", "endothelial", "epicardial", "fibroblasts", "lymphocytes", "myeloid", "lymphatic", "pericytes", "smooth.muscle"))
+
+nuclei <- RunUMAP(nuclei, reduction = "integrated.rpca",
+                            dims = 1:30,
+                            n.components = 3L, return.model = T, verbose = T, reduction.name = "umap")
+
+head(Embeddings(object = nuclei, reduction = "umap"))
+
+plot.data_annot <- FetchData(object = nuclei, vars = c("umap_1", "umap_2", "umap_3", "annot")) 
+plot.data_annot$label <- paste(rownames(plot.data_annot))
+
+fig_annot <- plot_ly(data = plot.data_annot, 
+        x = ~umap_1, y = ~umap_2, z = ~umap_3, 
+        color = ~annot, 
+        colors = c( "#8CE7E8", "#8D6CB6", "#DD3721", "#F0A6CF",  "#262A81", "#5082F5", "#78DA46", "#F3E54E",  "#A9A7FF", "#BB33B1", "#FFAF79", "#D0FB53",  "#B5C7E3" ),
+        type = "scatter3d", 
+        mode = "markers", 
+        marker = list(size = 0.5, width=2),
+        text=~annot, 
+        hoverinfo="text") 
+
+axx <- list(
+  nticks = 4,
+  range = c(-10,10))
+axy <- list(
+  nticks = 4,
+  range = c(-10,10))
+axz <- list(
+  nticks = 4,
+  range = c(-10,10))
+
+fig_annot <- fig_annot %>% layout(scene = list(xaxis=axx,yaxis=axy,zaxis=axz, aspectmode='cube'))
+fig_annot
+
+```
+
+```{r cell percentage plots}
+
+tab <- table(nuclei$orig.ident,nuclei$annot)
+tab <- tab/rowSums(tab)*100
+m <- melt(tab)
+png("Cell_Percentage_CombinedBargraph.png",width = 433,height = 433,res=120)
+ggplot(m,aes(x=Var1,fill=Var2,y=value))+geom_bar(stat="identity",width = .8)+theme_classic(base_size = 8)+theme(axis.text.x = element_text(hjust=1,angle = 45))+xlab("")+ylab("% of total cells")+theme(legend.key.size = unit(.3,"cm"),legend.text = element_text(size=8))
+dev.off()
+
+
+```
