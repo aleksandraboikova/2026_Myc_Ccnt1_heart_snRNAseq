@@ -1,0 +1,877 @@
+---
+title: "03_Cardiomyocyte_analysis_snRNAseq_analysis_reference"
+author: "Sasha Boikova"
+date: "2026-11-08"
+output: html_document
+---
+
+
+```{r Document knit settings}
+library (knitr)
+opts_chunk$set(echo=T, cache = T, cache.lazy=F, error = F, warnings = F, eval=T, fig.align='center', message = FALSE, warning = FALSE)
+options(stringsAsFactors = FALSE)
+knitr::opts_knit$set(root.dir = "C:/Users/")
+```
+
+```{r Load libs, install from BiocManager}
+
+library(dplyr)
+library(remotes)
+library(reticulate)
+library(future)
+library(stringr)
+library(grid)
+
+library(Seurat)
+library(SeuratWrappers)
+library(sctransform)
+library(glmGamPoi)
+
+library(patchwork)
+library(ggplot2)
+library(reshape2)
+library(viridis)
+library(RColorBrewer)
+
+library(msigdbr)
+library(clusterProfiler)
+library(enrichplot)
+library(orthogene)
+library(org.Mm.eg.db)
+library(AnnotationHub)
+library(scCustomize)
+library(pheatmap)
+library(EnhancedVolcano)
+library(monocle3)
+library(ComplexHeatmap)
+
+```
+
+```{r Cardiomyocyte subclustering}
+
+CM <- subset(nuclei, idents = c("cardiomyocytes")) # from integrated dataset object subet cardiomyocytes
+
+DefaultAssay(CM) <- "RNA"
+
+CM[['integrated.rpca']] <- NULL
+CM[['SCT']] <- NULL
+
+CM[["RNA"]] <- split(CM[["RNA"]], f = CM$orig.ident)
+Layers(CM[["RNA"]])
+
+CM <- NormalizeData(CM, verbose = T)
+CM <- FindVariableFeatures(CM, verbose = T)
+CM <- ScaleData(CM, verbose = T)
+CM <- RunPCA(CM, verbose = T)
+gc()
+
+CM <- IntegrateLayers(object = CM, method = RPCAIntegration, orig.reduction = "pca", new.reduction = "integrated.rpca",  verbose = T) 
+
+CM <- FindNeighbors(CM, reduction = "integrated.rpca", dims = 1:30)
+CM <- FindClusters(CM, resolution = 0.5)
+CM <- RunUMAP(CM, reduction = "integrated.rpca", dims = 1:30, reduction.name = "umap.rpca", return.model = T, verbose = T)
+
+CM <- JoinLayers(CM)  
+
+DimPlot(CM, reduction = "umap.rpca", group.by = "annot", split.by = "orig.ident")
+
+saveRDS(CM, file = "ALL_Cardiomyocytes_integrated.RDS")
+
+```
+
+```{r check for doublet cluster contamination}
+
+Idents(CM) <- "seurat_clusters" 
+
+DotPlot(CM, features = c( "Ttn", "Ryr2", "Myh6", # CM markers
+"Cdh5", "Pecam1", "Vwf", "Cyyr1", "Etl4", "Fabp4" , # Non-CM major cell type markers used to guide cluster exclusion due to possible doublet contamination
+"Cytl1", "Tmem108", "Npr3", "Eng" ,
+"Muc16", "Wdr17", "Sulf1", "Msln"  ,
+"Col1a1", "Pcdh9", "Abca8a", "Bicc1" , 
+"Trpc3", "Rgs5", "Nrxn1", "Abcc9", "Pdgfrb", "Notch3", "Pde8b" ,
+"Csf1r", "Mrc1", "F13a1", "Slc9a9" ) , group.by = "seurat_clusters", assay = "RNA") + theme(axis.text.x = element_text(angle = 90, hjust=1)) + scale_color_viridis(direction = -1) + scale_y_discrete(limits=rev)
+
+CM <- subset(CM, idents = c(9, 11, 15, 17, 18, 20, 22, 24, 26), invert = TRUE) # remove doublet satellite clusters 
+
+```
+
+
+```{r CM annotation}
+CM <- FindClusters(CM, resolution = 0.25)
+Idents(object = CM) <- "seurat_clusters"
+CM_clust_markers_30perc <- FindAllMarkers(CM, min.pct = 0.3, logfc.threshold = 0.25, verbose = T,  only.pos = T)
+CM_clust_markers_10perc <- FindAllMarkers(CM, min.pct = 0.1, logfc.threshold = 0.25, verbose = T,  only.pos = T)
+
+    CM_clust_markers_30perc %>%
+    group_by(cluster) %>%
+    filter(p_val_adj < 0.01)%>%
+    top_n(n = 5, wt = avg_log2FC) -> top5cl30
+  
+    CM_clust_markers_10perc %>%
+    group_by(cluster) %>%
+    filter(p_val_adj < 0.01)%>%
+    top_n(n = 5, wt = avg_log2FC) -> top5cl10
+    
+Clustered_DotPlot(seurat_object = CM, features = top5cl30$gene) + theme(axis.text.y = element_text(size = 10))
+Clustered_DotPlot(seurat_object = CM, features = top5cl10$gene) + theme(axis.text.y = element_text(size = 10))
+
+#Markers of CM functional states used for annotation of subpopulations
+# CM_1 (baseline ventricular CM marker expression) CM_1_high <- c("Ttn", "Ryr2", "Myh6")
+# CM_2 (stress response) CM_2_high <- c( "Creb5", "Tlr4", "Ankrd1", "Xirp2", "Tgfb2", "Uck2", "Pvt1", "Fstl4", "Ankrd23", "Pdlim3", "Flnc")
+# CM_3 (proliferation) CM_3_high <- c("Neil3", "Cdca2", "Iqgap3", "Knl1", "Ect2", "Lockd", "Kif15", "Kif11", "Top2a", "Diaph3", "Ckap2", "Anln", "Atad2", "Tpx2", "Prc1", "Zgrf1", "Polq", "Smc2", "Mki67", "Rad51b", "Cenpp", "Hjurp", "Plekha7", "Ncapd2", "Blm", "Cep128", "Cep192", "Smc4", "Ezh2", "Ccdc34", "Cenpf", "G2e3", "dr76", "Ncam1", "Pola1", "Cep57l1", "Nsd2")
+# CM_4 (metabolic activity) CM_4_high <- c("Scgb1a1", "Myl7", "Cox5b", "Nppa", "Lrp1b",  "Chchd10", "Cox7a1", "Ndufa1", "Mb", "Eln", "Elob", "Ndufv3", "Atp5md", "Myl4", "Cox6c", "Uqcrb", "Atp5mpl", "Ndufc1", "Uqcr11",  "Atp5e", "Gapdh", "Ndufs6",  "Ndufa13",  "Ndufb11", "Ndufa3", "Tpt1", "Atp5g1", "Rpl12", "Atp5j", "Rpl23a", "Chchd2", "Atp5k", "Ndufa2", "Fth1", "Rpl4", "Uqcc2", "Atp5h", "Ndufa5", "Ndufb8", "Rps27", "S100a1", "Cox8b", "Cox6a2")
+
+CM@meta.data$annot <- ""
+CM@meta.data$annot <- CM@meta.data$seurat_clusters
+CM@meta.data$annot <- as.character(CM@meta.data$annot)
+CM@meta.data$annot[CM@meta.data$annot == 0] <- "CM_1"  # e.g. seurat cluster 0 was assigned as CM_1 based on the cluster marker gene expression comparison
+
+
+Idents(object = CM) <- "annot"
+CM_annot_markers_30perc <- FindAllMarkers(CM, min.pct = 0.3,  logfc.threshold = 0.25, verbose = T,  only.pos = T)
+    CM_annot_markers_30perc %>%
+    group_by(cluster) %>%
+    filter(p_val_adj < 0.01)%>%
+    top_n(n = 20, wt = avg_log2FC) -> top20an30
+Clustered_DotPlot(seurat_object = CM, features = top20an30$gene, colors_use_idents = Palette_CM3) + theme(axis.text.y = element_text(size = 10))
+
+FeaturePlot_scCustom(seurat_object = CM, features = c("Myh6", "Ttn", "Ryr2", "Nnt", "Kcnd2", "Smtn", "Tlr4", "Ankrd1", "Xirp2", "Slit2", "Knl1", "Esco2", "Mki67", "Top2a", "Neil3", "Mb","Ndufa1", "Cox5b"),  order = T, num_columns = 3, figure_plot = T, pt.size = 0.5)
+FeaturePlot_scCustom(seurat_object = CM,  features = c("Tpx2", "Ccna2", "Ccnb1", "Ccnb2", "Cdk1", "E2f2", "E2f7", "Rangap1", "Anln", "Ckap2", "Cenpa", "Yap1"),  order = T, num_columns = 3, figure_plot = T, pt.size = 0.5) + NoAxes()
+
+
+CM_markers <- FindAllMarkers(CM, verbose = T)
+
+CM1_cluster_markers <- CM_markers %>% 
+  filter(cluster == "CM_1") %>%  
+  filter(p_val_adj < 0.01) %>% 
+  filter(avg_log2FC > 0) 
+
+CM2_cluster_markers <- CM_markers %>% 
+  filter(cluster == "CM_2") %>%  
+  filter(p_val_adj < 0.01) %>% 
+  filter(avg_log2FC > 0) 
+
+CM3_cluster_markers <- CM_markers %>% 
+  filter(cluster == "CM_3") %>%  
+  filter(p_val_adj < 0.01) %>% 
+  filter(avg_log2FC > 0) 
+
+CM4_cluster_markers <- CM_markers %>% 
+  filter(cluster == "CM_4") %>% 
+  filter(p_val_adj < 0.01) %>% 
+  filter(avg_log2FC > 0) 
+
+
+Idents(CM) <- "annot"
+CM@active.ident <- factor(CM@active.ident, 
+                            levels=c("CM_4", "CM_3", "CM_2", "CM_1"))
+avg_exp <- AverageExpression(CM, assays = "RNA",  return.seurat = FALSE)$RNA
+
+genes_of_interest <- c("Myh6", "Ryr2", "Ttn", "Fhl2", "Creb5", "Grk5", "Dock4","Tlr4", "Xirp2", "Nppb", "Top2a", "Mki67", "Cenpp", "Kif11", "Pvt1", "Nop56", "Bzw2", "Gnl3", "Ezh2","Ccnd3", "Ndufa1", "Cox5b", "Cox6c", "Atp5", "Fabp3")
+genes_of_interest <-  intersect(genes_of_interest, rownames(avg_exp))
+
+plot_data <- avg_exp[genes_of_interest, ]
+plot_data <- plot_data[rowSums(plot_data) > 0, ]
+plot_data <- plot_data[, colSums(plot_data) > 0]
+pheatmap(
+  plot_data,
+  scale = "row",                   
+  cluster_rows = F,             
+  cluster_cols =F,              
+  display_numbers = FALSE,          
+  color = colorRampPalette(c( "lightcyan", "white",  "darkmagenta"))(50),
+  border_color = NA,
+  fontsize_row = 12,                
+  fontsize_col = 12,               
+  main = "Average Gene Expression",
+  cellwidth = 20,
+  cellheight = 15
+)
+
+```
+
+```{r CM Figures}
+
+DimPlot(CM, split.by = "dataset", group.by = "genotype", cols = c("#C40F5B","#000000"))
+
+Idents(CM) <- "orig.ident"
+DimPlot(CM, label = F, shuffle = T) + scale_colour_manual(values= c("#262A81","#56B4E9", "#0072B2", "#5082F5","#A9A7FF","#009E73","#3F6A2C","#78DA46", "#F3E54E","#E69F00","#D55E00", "#CC79A7", "#F6222E","#B00068"))
+
+DimPlot_scCustom(CM, group.by = "annot", split.by = "genotype", colors_use =  c("#78DA46",  "#A9A7FF", "#DD3721", "#F3E54E"), figure_plot = T, shuffle = F)
+
+
+Idents(CM) <- "orig.ident"    
+DotPlot_scCustom(seurat_object = CM, features = c("Ccnd3", "Bzw2","Gnl3", "Polr3g", "Ldha", "Dctd", "Smpdl3b", "Simc1", "Eno1", "Fasn", "Odc1", "Srm", "Taf4b", "Nop56"),  assay = "RNA", x_lab_rotate = T, flip_axes = F) + theme(axis.text.y = element_text(size = 10))
+
+# CM annotation bar plots split by dataset and genotype 
+data_summary <- CM@meta.data %>%
+  group_by(dataset, genotype, annot) %>%
+  tally(name = "Count") %>%                   
+  mutate(Frequency = Count / sum(Count))
+print(head(data_summary))
+
+data_summary$annot <- factor(data_summary$annot, 
+                            levels= c("CM_1","CM_2","CM_3","CM_4"))
+data_summary$dataset <- factor(data_summary$dataset, 
+                            levels= c("juvenile","adult","MI"))
+
+
+ggplot(data_summary, aes(x = dataset, y = Frequency, fill = annot)) +
+  geom_bar(stat = "identity", position = "fill") +  
+  facet_wrap(~ genotype) +                           
+  labs(
+    title = "CM subcluster percentage",
+    x = "dataset genotype group",
+    y = "% of cells"
+  ) +
+  scale_fill_manual(values = c( "CM_1" = "#78DA46", "CM_2" = "#A9A7FF", "CM_3" ="#DD3721", "CM_4" = "#F3E54E")) + # Custom colors for phases
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.spacing = unit(0.5, "lines")
+  )
+
+```
+
+```{r Cell Cycle Scoring}
+
+s.genes <- c("Mcm5", "Pcna", "Tyms", "Fen1", "Mcm2", "Mcm4", "Rrm1", "Ung", "Gins2",   "Mcm6",   "Cdca7",   "Dtl",   "Prim1",   "Uhrf1",   "Mlf1ip",   "Hells",   "Rfc2",   "Rpa2",   "Nasp",   "Rad51ap1",   "Gmnn",   "Wdr76",   "Slbp",   "Ccne2",   "Ubr7",   "Pold3",  "Msh2",   "Atad2",   "Rad51",   "Rrm2",   "Cdc45",   "Cdc6",   "Exo1",   "Tipin",   "Dscc1",   "Blm",   "Casp8ap2",   "Usp1",   "Clspn",   "Pola1",   "Chaf1b",   "Brip1", "E2f8")
+
+g2m.genes <- c("Hmgb2", "Cdk1", "Nusap1", "Ube2c", "Birc5", "Tpx2", "Top2a", "Ndc80", "Cks2","Nuf2", "Cks1b", "Mki67", "Tmpo", "Cenpf", "Tacc3", "Fam64a", "Smc4", "Ccnb2", "Ckap2l", "Ckap2", "Aurkb", "Bub1", "Kif11", "Anp32e", "Tubb4b", "Gtse1", "Kif20b", "Hjurp", "Cdca3","Hn1", "Cdc20", "Ttk", "Cdc25c", "Kif2c", "Rangap1", "Ncapd2", "Dlgap5", "Cdca2", "Cdca8","Ect2", "Kif23", "Hmmr", "Aurka", "Psrc1", "Anln", "Lbr", "Ckap5", "Cenpe", "Ctcf", "Nek2","G2e3", "Gas2l3", "Cbx5","Cenpa" )
+
+cc.genes <- c("Mcm5", "Pcna", "Tyms", "Fen1", "Mcm2", "Mcm4", "Rrm1", "Ung", "Gins2", "Mcm6",   "Cdca7",   "Dtl",   "Prim1",   "Uhrf1",   "Mlf1ip",   "Hells",   "Rfc2",   "Rpa2",   "Nasp",   "Rad51ap1",   "Gmnn",   "Wdr76", "Slbp",   "Ccne2",   "Ubr7",   "Pold3",   "Msh2","Atad2",   "Rad51",   "Rrm2",   "Cdc45",   "Cdc6",   "Exo1",   "Tipin",   "Dscc1",   "Blm",   "Casp8ap2",   "Usp1",   "Clspn",   "Pola1",   "Chaf1b",   "Brip1", "E2f8", "Hmgb2", "Cdk1", "Nusap1", "Ube2c", "Birc5", "Tpx2", "Top2a", "Ndc80", "Cks2","Nuf2", "Cks1b", "Mki67", "Tmpo", "Cenpf", "Tacc3", "Fam64a", "Smc4", "Ccnb2", "Ckap2l", "Ckap2", "Aurkb", "Bub1", "Kif11", "Anp32e", "Tubb4b", "Gtse1", "Kif20b", "Hjurp", "Cdca3","Hn1", "Cdc20", "Ttk", "Cdc25c", "Kif2c", "Rangap1", "Ncapd2", "Dlgap5", "Cdca2", "Cdca8","Ect2", "Kif23", "Hmmr", "Aurka", "Psrc1", "Anln", "Lbr", "Ckap5", "Cenpe", "Ctcf", "Nek2","G2e3", "Gas2l3", "Cbx5","Cenpa" )
+
+
+CM <- CellCycleScoring(object = CM, s.features = s.genes, g2m.features = g2m.genes, set.ident = F)
+
+DimPlot_scCustom(CM, group.by = "Phase",  colors_use =  c(  "#8CE7E8",  "#BB33B1", "#5082F5"), figure_plot = T)
+
+FeaturePlot_scCustom(seurat_object = CM, features = "S.Score", split.by = "genotype")
+FeaturePlot_scCustom(seurat_object = CM, features = "G2M.Score", split.by = "genotype")
+
+DotPlot_scCustom(CM, features = unique(cc.genes), group.by = "annot")  + theme( axis.text.x = element_text(angle = 90, hjust=1, size = 6), axis.text.y = element_text(size = 10))  + scale_y_discrete(limits=rev)
+
+```
+
+
+```{r Differential gene expression}
+
+Idents(object = CM) <- "dataset"
+CM_adult <- FindMarkers(CM, assay = "RNA", ident.1 = "Cre", group.by = 'genotype', subset.ident = "adult", verbose = T)
+CM_MI <- FindMarkers(CM, assay = "RNA", ident.1 = "Cre", group.by = 'genotype', subset.ident = "MI", verbose = T)
+CM_juvenile <- FindMarkers(CM, assay = "RNA", ident.1 = "Cre", group.by = 'genotype', subset.ident = "juvenile", verbose = T)
+
+CM_MI_degs<- read.csv("CM_MI_nov24.csv")
+
+CM_MI_degs_UP <- CM_MI_degs %>%  
+ filter(p_val_adj < 0.01) %>%
+ filter(avg_log2FC > 0) 
+
+CM_MI_degs_DN <- CM_MI_degs %>%  
+ filter(p_val_adj < 0.01) %>%
+ filter(avg_log2FC < 0)
+
+write.csv(CM_MI_degs_UP, "CM_MI_degs_UP_padj_all.csv")
+write.csv(CM_MI_degs_DN, "CM_MI_degs_DN_padj_all.csv")
+
+CM_JUV_degs<- read.csv("CM_juvenile_nov24.csv")
+
+CM_JUV_degs_UP <- CM_JUV_degs %>%  
+ filter(p_val_adj < 0.01) %>%
+ filter(avg_log2FC > 0) 
+
+CM_JUV_degs_DN <- CM_JUV_degs %>%  
+ filter(p_val_adj < 0.01) %>%
+ filter(avg_log2FC < 0)
+
+write.csv(CM_JUV_degs_UP, "CM_JUV_degs_UP_padj_all.csv")
+write.csv(CM_JUV_degs_DN, "CM_JUV_degs_DN_padj_all.csv")
+
+CM_ADULT_degs<- read.csv("CM_adult_nov24.csv")
+
+CM_ADULT_degs_UP <- CM_ADULT_degs %>%  
+ filter(p_val_adj < 0.01) %>%
+ filter(avg_log2FC > 0) 
+
+CM_ADULT_degs_DN <- CM_ADULT_degs %>%  
+ filter(p_val_adj < 0.01) %>%
+ filter(avg_log2FC < 0)
+
+write.csv(CM_ADULT_degs_UP, "CM_ADULT_degs_UP_padj_all.csv")
+write.csv(CM_ADULT_degs_DN, "CM_ADULT_degs_DN_padj_all.csv")
+
+
+
+Idents(CM) <- "orig.ident"
+CM@active.ident <- factor(CM@active.ident, 
+                            levels=c("15_day_Myc", "adult_nuclei.Cre_1", "adult_nuclei.Cre_2", "adult_nuclei.Cre_3", "adult_nuclei.Cre_4", "adult_MI_nuclei.Cre_1", "adult_MI_nuclei.Cre_2", "adult_MI_nuclei.Cre_3", "15_day_WT", "adult_nuclei.wt_1", "adult_nuclei.wt_3", "adult_MI_nuclei.wt_1", "adult_MI_nuclei.wt_2", "adult_MI_nuclei.wt_3"))
+
+avg_exp <- AverageExpression(CM, assays = "RNA",  return.seurat = FALSE)$RNA
+
+
+#Heatmaps of the HALLMARK E2F targets, G2M checkpoint, glycolysis, mTORC1 signalling genes
+
+#Hallmark E2F targets
+genes_of_interest_HM <- c("Nop56", "Shmt1", "Nap1l1", "Jpt1", "Pa2g4", "Pole", "Nup205", "Nup107", "Orc6", "Mms22l", "Atad2", "Hells", "Pold2", "Dut", "Tipin", "Brca2", "Top2a", "Gins1", "Pms2", "Cdc25a", "Mcm6", "Diaph3", "Stmn1", "Cnot9", "Timeless", "Myc", "Mthfd2", "Cit", "Brca1", "Smc4", "Mki67", "Prim2", "Ezh2", "Bard1", "Cenpe", "Ncapd2", "Lig1", "Birc5", "Hmmr", "Lmnb1", "Cbx5", "Rad51ap1", "Tmpo", "Spag5", "Spc25", "Hmgb2", "Racgap1", "Nasp", "Chek2", "Rrm2", "Bub1b", "Rfc1", "E2f8", "Cdca8", "Cdca3", "Ube2t", "Rpa1", "Dnmt1", "Espl1", "Dek", "Melk", "Pcna", "Cdk1", "Plk4", "Lbr", "Tk1", "Pold3", "Spc24", "Kif18b", "Dlgap5", "Asf1b", "Trip13", "Kif22", "Ilf3", "Cks2", "Tacc3", "Slbp", "Mcm7", "Cenpm", "Rad21", "Psip1", "Pola2", "Kif2c", "Rfc2", "Aurkb", "Ccnb2", "Dck", "Rad50", "Cdkn2c", "Wee1", "Ppm1d", "Mcm3", "Tcf19", "Mad2l1", "Mcm5", "Aurka", "Chek1", "Gins3", "Ccp110", "Wdr90", "Cdkn1a", "Mybl2", "Dscc1", "Anp32e", "Cdc20", "Rpa2", "Ccne1", "Mcm4", "Rad51c", "Suv39h1", "Msh2", "Mcm2", "Mxd3", "Pold1", "Rnaseh2a", "Exosc8", "Rfc3", "Plk1", "Dclre1b", "Psmc3ip", "Cdc25b", "Cks1b", "Ran", "Nolc1", "Ube2s", "Nme1", "Ranbp1", "Ipo7", "Gspt1", "Rbbp7", "Cse1l", "Lyar", "Srsf1", "Dctpp1", "Snrpb", "Ssrp1", "Smc1a", "Eif2s1", "Tbrg4", "Xpo1", "Hnrnpd", "Xrcc6", "Cdk4", "Ak2", "Nup153", "Phf5a", "Usp1", "Orc2", "Hmga1", "Pole4", "Prps1", "Zw10", "Cdkn3", "Nudt21", "Eed", "Mlh1", "Ung", "Tubg1", "Ubr7", "Pop7", "Gins4")
+
+#Hallmark G2M checkpoint
+genes_of_interest_HM <- c("Map3k20", "Slc7a1", "Ncl", "Uck2", "E2f3", "Dtymk", "Kmt5a", "Slc7a5", "Tfdp1", "Jpt1", "Prmt5", "Pole", "Orc6", "Nsd2", "Smc2", "Brca2", "Top2a", "Cdc25a", "Mcm6", "Prc1", "Stmn1", "Myc", "Dbf4", "Knl1", "Smc4", "Mki67", "Kif11", "Prim2", "Ezh2", "Kif15", "Bard1", "Polq", "Kif20b", "Cenpe", "Nusap1", "Tpx2", "Cenpf", "Birc5", "Hmmr", "Lmnb1", "Kif23", "Tmpo", "Cdc7", "G3bp1", "Stil", "Racgap1", "Nasp", "Ccnf", "Rad54l", "Ttk", "Ndc80", "Incenp", "Bub1", "Chaf1a", "Cenpa", "Espl1", "E2f1", "Cdk1", "E2f2", "Plk4", "Exo1", "Lbr", "Rbl1", "Kif22", "Ilf3", "Cks2", "Cdc45", "Traip", "Troap", "Fbxo5", "Tacc3", "Fancc", "Wrn", "Slc38a1", "Rad21", "Pola2", "Kif2c", "Aurkb", "Ccnb2", "Pbk", "Cdc6", "Cdkn2c", "Mcm3", "Pml", "Mad2l1", "Mcm5", "Aurka", "Chek1", "Snrpd1", "Mybl2", "Cdc20", "Ccna2", "Rpa2", "Ube2c", "Suv39h1", "Mcm2", "Nek2", "Plk1", "Gins2", "Cdc25b", "Cks1b", "Nolc1", "Ube2s", "Smarcc1", "Odc1", "Gspt1", "Rad23b", "Mnat1", "Kpnb1", "Dkc1", "Srsf1", "Smc1a", "Cdc27", "Xpo1", "Hnrnpd", "Cdk4", "Bub3", "Odf2", "Hmgn2", "Hmga1", "Hira", "Cdkn3", "Orc5", "Sqle", "Tnpo2", "Nup50", "Ccnd1", "Tent4a", "E2f4")
+
+#Hallmark Glycolysis genes
+genes_of_interest_HM <- c("Mif", "Ecd", "Stc2", "Pgam1", "Slc37a4", "Ddit4", "Cyb5a", "Stmn1", "Hmmr", "Nasp", "Cenpa", "Cdk1", "Galk2", "Me2", "Gclc", "Aurka", "Gne", "Hs6st2", "Cln6", "Tpst1", "Kif20a", "Cxcr4", "Nsdhl", "Ldha", "Ppia", "Pgls", "Eno1", "Galk1", "Cd44", "Gusb", "Rbck1", "Slc16a3", "Prps1", "Angptl4", "P4ha1", "Aldh7a1", "Lhpp", "Spag4", "Pfkfb1", "Sdc1", "Abcb6", "Med24", "Ak4", "Xylt2", "Chpf", "Polr3k", "Rpe", "Cth", "Met", "Hax1", "B3galt6")
+
+#Hallmark mTORC1 signalling genes
+genes_of_interest_HM <- c("Pdk1", "Hspd1", "Polr3g", "Slc7a5", "Rrp9", "Nup205", "Eef1e1", "Slc37a4", "Ddit4", "Cdc25a", "Insig1", "Rab1a", "Tmem97", "Mthfd2", "Slc2a1", "Ccnf", "Rrm2", "Bub1", "Rpa1", "Edem1", "Dhfr", "Gclc", "Uchl5", "Aurka", "Cdkn1a", "Coro1a", "Slc2a3", "Mcm4", "Mcm2", "Acsl3", "Cxcr4", "Sla", "Srd5a1", "Plk1", "Tes", "Sytl2", "Elovl6", "Ldha", "Eif2s2", "Ppia", "Hspa4", "Pdap1", "Cct6a", "Acaca", "Gsr", "Etf1", "Prdx1", "Stip1", "Btg2", "Ifi30", "Psme3", "Hspe1", "Asns", "Eno1", "Psmd14", "Slc6a6", "Ppa1", "Psat1", "Gmps", "Cyb5b", "Txnrd1", "Rpn1", "Shmt2", "Cacybp", "Qdpr", "Ldlr", "Abcf2", "Mllt11", "P4ha1", "Acly", "Psmg1", "Sqle", "Phgdh", "Ung", "Nufip1", "Idi1", "Tubg1", "Dhcr24", "Fdxr", "Ak4", "Pno1", "Rdh11", "Dhcr7", "Cth")
+
+genes_of_interest <-  intersect(genes_of_interest_HM, rownames(avg_exp))
+plot_data <- avg_exp[genes_of_interest, ]
+plot_data <- plot_data[rowSums(plot_data) > 0, ]
+plot_data <- plot_data[, colSums(plot_data) > 0]
+
+pheatmap(
+  plot_data,
+  scale = "row",                    
+  cluster_rows = T,              
+  cluster_cols =F,             
+  display_numbers = FALSE,          
+  color = colorRampPalette(c("blue", "white", "red"))(50),  
+  border_color = NA,
+  fontsize_row = 4,                 
+  fontsize_col = 12,                
+  main = "Hallmark Geneset Expression"
+)
+             
+
+```
+
+```{r DEG overlap plots}
+
+overlap_commonDEGs <- c(
+  "Immp2l", "Kcnq5", "Macrod2", "Gm47283", "Wwox", "Pvt1","Taf1d", "Fam185a", "Gnl3", "Focad", "Rapgef4", "Rbm28","Wdr43", "Gm26917", "Dixdc1", "Xpo6", "Ica1", "Sfxn1","Nop56", "Gmds", "Zc3h8", "Gm15787", "Gng12", "Eml4","Slc7a1", "Knop1", "Gm32369", "Ctps", "Adat1", "Pdia5","Taf4b", "Prmt3", "Rad51b", "Deptor", "Pus7", "Psmg2","5430431A17Rik", "Jpx", "Nkain2", "Nop58", "Ankrd6", "Fig4","Erc2", "Dctd", "E2f3", "Noc2l", "Simc1", "Slc25a19","Prkag3", "Sms", "Fgfr1op", "2610020C07Rik", "Telo2", "Gm40437","Adpgk", "Shmt1", "A630089N07Rik", "Cers6", "Baz1a", "Mir17hg","Gm17382", "Mri1", "Polr3g", "Rangap1", "Ube2cbp", "Tiam1","2410006H16Rik", "Gstcd", "Pde3b", "Wdr12", "Gm20468", "Ntng2","Rrp1b", "Slc35f1", "Exosc7", "Tprkb", "Dtymk", "Sppl2b","Nxpe3", "Nap1l1", "Mthfd1l", "Ppid", "Ppan", "Slc7a5","Heatr1", "Mettl8", "Hbegf", "Nup210", "Brip1os", "Spire1","Gm40649", "L3hypdh", "Erlin1", "Igdcc4", "Zfp692", "Cobl","Tfdp1", "Crocc", "Pomgnt2", "Noa1", "AI506816", "Dhrs13", "Mtap", "Smpdl3b", "Trit1", "Gm47376", "Epb41l4aos", "Reep6", "St6galnac4", "Dgki", "Sntg2", "Flrt3", "Tcea2", "Sybu", "Gm39168", "Snhg15", "Cdca7l", "Mogs", "Syt12", "2900005J15Rik",  "Rragb", "Ifrd2", "Rrp9", "Zgrf1", "Slc1a3", "Macrod2os1","Aprt", "Lin28b", "Uxs1", "Atad5", "Cstf2", "Pcgf6",  "Gpr137c", "Snhg17", "Vrk1", "Frrs1", "Ccdc15", "Pole", "Nup205", "Arsg", "Blm", "Vars", "Topbp1", "Aen",  "Pomt1", "Sinhcaf", "Abhd14a", "Grip1", "Sergef", "Snhg1",  "Polr1e", "Nup107", "Fpgs", "Rapgef4os1", "Nup85", "Cdca7",  "2610021A01Rik", "6030442K20Rik", "Eef1e1", "Ttpa", "Gm15179", "Pgm2l1",  "Orc6", "Mms22l", "Atic", "Atad2", "Nsd2", "Eda2r", "Gm36198", "4930594M22Rik", "Thyn1", "Gm36173", "Dtl", "Tfap4",  "Zfp566", "Gpr68", "Hells", "Orc1", "Smc2", "Gm34590", "Poli", "Taco1", "Pold2", "Rnaseh2b", "Cep295", "Rad18",  "Ruvbl1", "Tagap1", "Cenpk", "2700038G22Rik", "Mrto4", "2010204K13Rik",  "Hs6st3", "B230217O12Rik", "Cad", "Mak16", "Lins1", "Pcyox1l",  "Mcm8","Haus3", "Fam169a", "Gm47431", "Rhebl1", "Gm13919",  "Wdhd1", "Dut", "Tipin", "Dipk1a", "Brca2", "Cep152",  "Gar1", "Top2a", "Gamt", "Cntrl", "3110083C13Rik", "H2afz",  "Gm19708", "Gins1", "Tsr1", "Pms2", "Haus6", "A830019P07Rik",  "Gm12743", "Uhrf1", "Podxl2", "Cdc25a", "Mcm6", "Rbmxl1", "Nhp2", "Top1mt", "Wdr55", "Them7", "Slx4ip", "Ccne2",  "Mdc1", "Nmral1", "Tex30", "Diaph3", "Sass6", "Wwc1",  "Zwilch", "Prc1", "Prps2", "Spata48", "Lrrc45", "Alg8",  "Stmn1", "Gm41555", "Rmi2", "Slc35g1", "Kif18a", "Fut10", "Zfp934", "Ect2", "Timeless", "Myc", "Ckap2", "Ano3", "Urb2", "Lpin2", "Cdt1", "Haus4", "Ndc1", "Rcc1",  "Snhg4.1", "Stard6", "Limk1", "Tbc1d31", "Cit", "Palb2",  "Gm26901", "Dbf4", "Zfp808", "Hdac10", "Gm17092", "Brca1")
+
+Idents(CM) <- "dataset"
+DoHeatmap(object = subset(CM, ident = "adult"), features = overlap_commonDEGs, group.by = "genotype", assay = "RNA", slot = "data", group.colors = c("#C40F5B","#000000"), size = 5, disp.max = 2)+ scale_fill_viridis(option="inferno")
+DoHeatmap(object = subset(CM, ident = "MI"), features = overlap_commonDEGs, group.by = "genotype", assay = "RNA", slot = "data", group.colors = c("#C40F5B","#000000"), size = 5, disp.max = 2)+ scale_fill_viridis(option="inferno")
+DoHeatmap(object = subset(CM, ident = "juvenile"), features = overlap_commonDEGs, group.by = "genotype", assay = "RNA", slot = "data", group.colors = c("#C40F5B","#000000"), size = 5, disp.max = 2)+ scale_fill_viridis(option="inferno")
+
+#Hallmark geneset heatmaps
+
+#HALLMARK_MTORC1_SIGNALING
+genes_of_interest_HM <- c("Tubg1", "Ccnf", "Nmt1", "Rdh11", "Ccng1", "Cdc25a", "Mcm4", "Acly", "Fgl2", "Sla", "Cdkn1a", "Wars1", "Hspe1", "Fdxr", "Nfkbib", "Bcat1", "Psma3", "Gclc", "Tes", "Ssr1", "Slc1a5", "Mcm2", "G6pdx", "Cyp51", "Hmgcs1", "Atp5mc1", "Ebp", "Nfyc", "Sqstm1", "Cct6a", "Rit1", "Btg2", "Acaca", "Stip1", "Stc1", "Ddit3", "Pik3r3", "Sqle", "Ung", "Nfil3", "Tuba4a", "Ctsc", "Psmc2", "Cxcr4", "Psme3", "Bhlhe40", "Bub1", "Psmb5", "Tcea1", "Cacybp", "Gtf2h1", "Shmt2", "Slc7a5", "Dhcr7", "Hk2", "Slc37a4", "Ifrd1", "Lgmn", "Mthfd2", "Cth", "Hspa4", "Psmd13", "Trib3", "Coro1a", "Psmc4", "Map2k3", "Plod2", "Psma4", "Dapp1", "Gla", "Slc7a11", "Cops5", "Nherf1", "Asns", "Nufip1", "Add3", "Abcf2", "Sc5d", "Txnrd1", "Ero1a", "Phgdh", "Tomm40", "Psmg1", "Gsk3b", "Skap2", "Nupr1", "Psmd14", "Ube2d3", "Eef1e1", "Pno1", "Cyb5b", "Actr2", "Psmd12", "Psmc6", "Eif2s2", "Polr3g", "Uchl5", "Ufm1", "Rpa1", "Ddx39a", "Mthfd2l", "Elovl5", "Insig1", "Tmem97", "Tm7sf2", "Atp6v1d", "Gga2", "Actr3", "Gbe1", "Arpc5l", "Acsl3", "Ddit4", "Dhcr24", "Fads1", "Immt", "Pdk1", "Ppp1r15a", "Pitpnb", "Ykt6", "Uso1", "Sec11a", "Tbk1", "Mllt11", "Nampt", "Fads2", "Egln3", "Sytl2", "Slc1a4", "Glrx", "Niban1", "Ifi30", "Nup205", "Sdf2l1", "Elovl6", "Stard4", "Edem1", "Psat1", "Rrp9", "Etf1", "Idi1", "Gmps", "Pdap1", "Eno1b", "Gapdh-ps15", "Ak4", "Aldoa", "Atp2a2", "Calr", "Canx", "Serpinh1", "Cd9", "Aurka", "Serp1", "Adipor2", "Dhfr", "Fkbp2", "Slc2a1", "Slc2a3", "Got1", "Gpi1", "Gsr", "Hspa5", "Hmbs", "Hmgcr", "Hprt1", "Hspd1", "Hspa9", "Idh1", "Igfbp5", "Itgb2", "Ldha", "Ldlr", "Lta4h", "M6pr", "Me1", "Pnp", "P4ha1", "Cfp", "Pfkl", "Pgk1", "Pgm1", "Plk1", "Ppia", "Psph", "Ppa1", "Qdpr", "Eprs1", "Rab1a", "Rpn1", "Rrm2", "Sord", "Srd5a1", "Slc6a6", "Tpi1", "Hsp90b1", "Tfrc", "Vldlr", "Xbp1", "Prdx1")
+
+#HALLMARK_GLYCOLYSIS
+genes_of_interest_HM <- c("Gys1", "Vcan", "Vegfa", "Dsc2", "Lct", "Tff3", "Hmmr", "Ier3", "Gpc4", "Gpc3", "Gclc", "Il13ra1", "G6pdx", "Chpf", "Efna3", "Dld", "Pfkfb1", "Ext2", "Aldh7a1", "Kif2a", "Stc1", "Irs2", "Cxcr4", "Rragd", "Ankzf1", "Nsdhl", "Capn5", "Elf3", "Gpc1", "Kif20a", "Bik", "Taldo1", "Tpst1", "Cited2", "Casp6", "Hk2", "Slc37a4", "Lhx9", "Stc2", "Ppp2cb", "Cldn3", "Qsox1", "Artn", "Bpnt1", "Cth", "Tpbg", "Rbck1", "Med24", "Hs2st1", "Psmc4", "Hax1", "Plod2", "Gnpda1", "Homer1", "Sdc1", "Sdc3", "Sdc2", "Chst4", "Dpysl4", "Zfp292", "Slc25a10", "Ero1a", "Slc25a13", "Gne", "Hs6st2", "Copb2", "Nasp", "Gal3st1", "B4galt2", "Fut8", "Pmm2", "Ak3", "Aldh9a1", "Angptl4", "Paxip1", "Ndufv3", "Chst2", "Arpp19", "Miox", "Pfkp", "Cldn9", "Sdhc", "Pgls", "Rpe", "Polr3k", "Rars1", "Nanp", "Pkp2", "Ppfia4", "Gmppa", "Galk2", "Fam162a", "Chpf2", "Slc35a3", "Ecd", "B3gat3", "Abcb6", "Gale", "Ddit4", "Depdc1a", "Cog2", "Lhpp", "B3gat1", "Chst1", "Agl", "Nol3", "Cyb5a", "B4galt4", "Cacna1h", "Isg20", "Chst12", "Sap30", "Akr1a1", "Srd5a3", "Chst5", "Egln3", "Ndst3", "Pgam2", "Tktl1", "Slc16a3", "Gpr87", "Glrx", "Glce", "Kdelr3", "Me2", "B3gnt3", "B3galt6", "Cln6", "Ugp2", "Pdk3", "Alg1", "B4galt7", "Gys2", "Spag4", "Xylt2", "Gmppb", "Eno1b", "Agrn", "Ak4", "Aldoa", "Aldob", "Ang", "Cd44", "Cdk1", "Cenpa", "Col5a1", "P4ha2", "Ext1", "Aurka", "Dcn", "Egfr", "Eno2", "Fbp2", "Fkbp4", "Gapdhs", "Gfpt1", "B4galt1", "Galk1", "Got1", "Got2", "Hspa5", "Gusb", "Idh1", "Idua", "Igfbp3", "Stmn1", "Ldha", "Ldhc", "Mertk", "Met", "Mif", "Me1", "Mdh2", "Mdh1", "Mpi", "Mxi1", "P4ha1", "Pam", "Pcx", "Pgam1", "Pgk1", "Pgm2", "Phka2", "Pkm", "Ppia", "Prps1", "Pygb", "Pygl", "Sod1", "Sox9", "Tgfa", "Tpi1", "Gfus", "Txn1", "Vldlr", "Hdlbp", "Adora2b", "Nt5e", "Plod1", "Tgfbi")
+
+#HALLMARK_OXIDATIVE_PHOSPHORYLATION
+genes_of_interest_HM <- c("Phb2", "Cox6a1", "Fdx1", "Cox7c", "Nqo2", "Cox6c", "Gpx4", "Cox8a", "Cox7a2l", "Etfa", "Etfb", "Etfdh", "Tomm70a", "Atp5po", "Atp5me", "Hccs", "Vdac2", "Vdac1", "Vdac3", "Dld", "Cox6b1", "Atp5mc1", "Ndufa4", "Bckdha", "Atp5pf", "Atp5f1b", "Uqcrq", "Ndufv1", "Uqcrc1", "Ndufs6", "Nnt", "Casp7", "Abcb7", "Atp6ap1", "Fxn", "Ogdh", "Cpt1a", "Acaa2", "Idh3g", "Atp5pb", "Atp5f1c", "Sucla2", "Cox7a2", "Atp6v0e", "Cox17", "Hsd17b10", "Grpel1", "Ndufa2", "Timm17a", "Ndufs4", "Ndufc2", "Mrps12", "Polr2f", "Aifm1", "Tcirg1", "Pdk4", "Pdhx", "Mrpl15", "Timm8b", "Timm10", "Timm13", "Timm9", "Slc25a4", "Slc25a5", "Slc25a3", "Atp5f1e", "Ech1", "Mtx2", "Atp6v0b", "Mtrr", "Atp5f1d", "Ndufb5", "Sdhc", "Ndufa3", "Ndufa9", "Cox7b", "Atp6v1f", "Uqcr10", "Mrpl35", "Atp6v1g1", "Atp6v1c1", "Ndufc1", "Iscu", "Mrps15", "Ndufa7", "Cyc1", "Mgst3", "Ndufb3", "Timm50", "Uqcrh", "Uqcr11", "Uqcrfs1", "Acadsb", "Ndufb7", "Sdhd", "Sdha", "Uqcrc2", "Ndufa6", "Ndufb8", "Retsat", "Decr1", "Uqcrb", "Atp6v1h", "Sdhb", "Aldh6a1", "Idh3a", "Slc25a11", "Mpc1", "Mrps11", "Ndufb2", "Ndufa5", "Pdhb", "Ndufs3", "Ndufa8", "Oxa1l", "Afg3l2", "Bdh2", "Cox11", "Ndufab1", "Cox10", "Pmpca", "Atp5pd", "Lrpprc", "Cox15", "Ndufv2", "Atp6v1d", "Opa1", "Ndufs7", "Immt", "Rhot1", "Slc25a12", "Dlst", "Mrps30", "Cyb5a", "Suclg1", "Atp5mf", "Mrps22", "Htra2", "Slc25a20", "Ndufa1", "Hadha", "Hadhb", "Echs1", "Mrpl11", "Mrpl34", "Acaa1a", "Idh3b", "Mtrf1", "Rhot2", "Ndufs8", "Ndufs2", "Dlat", "Supv3l1", "Atp5mc3", "Mfn2", "Ndufs1", "Tomm22", "Ndufb6", "Pdp1", "AK157302", "Gm10053", "Acadm", "Acat1", "Aco2", "Alas1", "Prdx3", "Atp1b1", "Atp5f1a", "Atp6v0c", "Cox4i1", "Cox5a", "Cox5b", "Cs", "Phyh", "Atp6v1e1", "Acadvl", "Eci1", "Cyb5r3", "Fh1", "Glud1", "Got2", "Gpi1", "Hspa9", "Idh1", "Idh2", "Ldha", "Ldhb", "Maob", "Mdh2", "Mdh1", "Oat", "Pdha1", "Por", "Surf1", "Bax")
+  
+genes_of_interest <-  intersect(genes_of_interest_HM, rownames(avg_exp))
+plot_data <- avg_exp[genes_of_interest, ]
+plot_data <- plot_data[rowSums(plot_data) > 0, ]
+plot_data <- plot_data[, colSums(plot_data) > 0]
+
+pheatmap(
+  plot_data,
+  scale = "row",                    
+  cluster_rows = T,              
+  cluster_cols =F,             
+  display_numbers = FALSE,          
+  color = viridis_magma_light_high,  
+  border_color = NA,
+  fontsize_row = 4,                 
+  fontsize_col = 12,                
+  main = "Hallmark Geneset Expression",
+  cellwidth = 50,
+  cellheight = 3
+)
+
+                            
+```
+
+```{r GSEA ORA}
+# Geneset enrichment over-representation analysis 
+markers <- CM1_cluster_markers
+markers <- CM_MI_degs_UP
+
+top_genes <- markers %>%
+  top_n(n = -500, wt = p_val_adj)
+
+gene_entrez <- bitr(top_genes$X, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Mm.eg.db)$ENTREZID
+
+#1
+msigdb_genes <- msigdbr(species = "Mus musculus",  category = "H")
+msigdb_list <- msigdb_genes %>% dplyr::select(gs_name, entrez_gene)
+
+#2
+msigdb_genes <- msigdbr(species = "Mus musculus",  category = "C5", subcategory = "GO:BP")
+msigdb_list <- msigdb_genes %>% dplyr::select(gs_name, entrez_gene)
+
+#3
+msigdb_genes <- msigdbr(species = "Mus musculus",  category = "C2", subcategory = "REACTOME")
+msigdb_list <- msigdb_genes %>% dplyr::select(gs_name, entrez_gene)
+
+enrich_results <- enricher(gene = gene_entrez,
+                           TERM2GENE = msigdb_list,
+                           pvalueCutoff = 0.05, qvalueCutoff = 0.05) 
+
+enrichplot::dotplot(enrich_results, 
+        showCategory = 10,            
+        font.size = 9,              
+        color = "p.adjust"           
+        
+) +   ggtitle(" ") + scale_fill_viridis(option="viridis") 
+
+write.csv( enrich_results@result, "enrich_results_CM_XYZ.csv")
+
+```
+
+```{r GSEA dotplot custom plotting function}
+
+library(grid)
+
+parse_gene_ratio <- function(x) {
+  if (is.numeric(x)) return(x)
+
+  x <- as.character(x)
+
+  if (all(grepl("/", x[!is.na(x)]))) {
+    nums <- strsplit(x, "/", fixed = TRUE)
+
+    return(vapply(nums, function(z) {
+      as.numeric(z[1]) / as.numeric(z[2])
+    }, numeric(1)))
+  }
+
+  suppressWarnings(as.numeric(x))
+}
+
+
+set_fixed_panel_size <- function(
+    p,
+    panel_width = 7,
+    panel_height = 7,
+    left_axis_width = 7,
+    unit = "cm"
+) {
+  gt <- ggplotGrob(p)
+
+  panel_ids <- grep("^panel", gt$layout$name)
+
+  panel_cols <- unique(gt$layout$l[panel_ids])
+  panel_rows <- unique(gt$layout$t[panel_ids])
+
+  gt$widths[panel_cols] <- grid::unit(panel_width, unit)
+  gt$heights[panel_rows] <- grid::unit(panel_height, unit)
+
+  axis_l_ids <- grep("^axis-l", gt$layout$name)
+
+  if (length(axis_l_ids) > 0) {
+    axis_l_cols <- unique(gt$layout$l[axis_l_ids])
+    gt$widths[axis_l_cols] <- grid::unit(left_axis_width, unit)
+  }
+
+  gt
+}
+
+
+hard_wrap_label <- function(x, width = 25, replace_underscores = TRUE) {
+  x <- as.character(x)
+
+  if (replace_underscores) {
+    x <- gsub("_", " ", x)
+  }
+
+  x <- gsub("/", " / ", x)
+  x <- gsub(":", ": ", x)
+  x <- gsub("-", "- ", x)
+  x <- gsub("\\s+", " ", x)
+
+  vapply(x, function(label) {
+    words <- unlist(strsplit(label, " ", fixed = TRUE))
+
+    lines <- character()
+    current <- ""
+
+    for (w in words) {
+      # If a single word is longer than width, split it forcibly
+      if (nchar(w) > width) {
+        chunks <- regmatches(w, gregexpr(paste0(".{1,", width, "}"), w))[[1]]
+
+        if (nzchar(current)) {
+          lines <- c(lines, current)
+          current <- ""
+        }
+
+        lines <- c(lines, chunks)
+
+      } else if (!nzchar(current)) {
+        current <- w
+
+      } else if (nchar(paste(current, w)) <= width) {
+        current <- paste(current, w)
+
+      } else {
+        lines <- c(lines, current)
+        current <- w
+      }
+    }
+
+    if (nzchar(current)) {
+      lines <- c(lines, current)
+    }
+
+    paste(lines, collapse = "\n")
+  }, character(1))
+}
+
+
+plot_enrich_dotplot_fixed_panel <- function(
+    enrich_df,
+    top_n = 20,
+
+    gene_ratio_col = "GeneRatio",
+    description_col = "Description",
+    count_col = "Count",
+    p_col = "p.adjust",
+
+    cluster_col = NULL,
+
+    title = "Enrichment dotplot",
+
+    label_width = 35,
+    label_mode = c("truncate", "wrap", "none"),
+
+    order_by = c("p", "gene_ratio", "count"),
+    show_p_as = c("minus_log10", "raw"),
+
+    dot_size_range = c(2.5, 8),
+
+    p_cutoff = NULL,
+
+    # Actual dotplot grid size
+    panel_width_cm = 8,
+    panel_height_cm = 8,
+
+    # Fixed space reserved for wrapped pathway labels
+    left_axis_width_cm = 8,
+
+    # Final saved file size
+    save_plot = FALSE,
+    filename = "enrichment_dotplot_fixed_panel.pdf",
+    device_width = 10,
+    device_height = 8,
+
+    # Viridis colour scale
+    colour_scheme = "plasma",
+    colour_direction = 1,
+    y_label_size = 8,
+    
+    y_label_lineheight = 0.85,
+    x_label_size = 10,
+    legend_title_size = 9,
+    legend_text_size = 8
+
+) {
+  label_mode <- match.arg(label_mode)
+  order_by <- match.arg(order_by)
+  show_p_as <- match.arg(show_p_as)
+
+  if (!requireNamespace("viridis", quietly = TRUE)) {
+    stop("Package 'viridis' is required. Install it with install.packages('viridis').")
+  }
+
+  required_cols <- c(gene_ratio_col, description_col, count_col, p_col)
+
+  if (!is.null(cluster_col)) {
+    required_cols <- c(required_cols, cluster_col)
+  }
+
+  missing_cols <- setdiff(required_cols, colnames(enrich_df))
+
+  if (length(missing_cols) > 0) {
+    stop(
+      "Missing required column(s): ",
+      paste(missing_cols, collapse = ", "),
+      call. = FALSE
+    )
+  }
+
+  df <- enrich_df %>%
+    as.data.frame() %>%
+    mutate(
+      gene_ratio_numeric = parse_gene_ratio(.data[[gene_ratio_col]]),
+      count_numeric = as.numeric(.data[[count_col]]),
+      p_value_plot = as.numeric(.data[[p_col]])
+    ) %>%
+    filter(
+      is.finite(gene_ratio_numeric),
+      is.finite(count_numeric),
+      is.finite(p_value_plot)
+    )
+
+  if (!is.null(p_cutoff)) {
+    df <- df %>%
+      filter(p_value_plot <= p_cutoff)
+  }
+
+  if (nrow(df) == 0) {
+    stop("No enrichment terms left after filtering.", call. = FALSE)
+  }
+
+  df <- df %>%
+    mutate(
+      p_value_safe = ifelse(p_value_plot == 0, .Machine$double.xmin, p_value_plot),
+      minus_log10_p = -log10(p_value_safe)
+    )
+
+  if (is.null(cluster_col)) {
+    df <- df %>%
+      {
+        if (order_by == "p") arrange(., p_value_plot)
+        else if (order_by == "gene_ratio") arrange(., desc(gene_ratio_numeric))
+        else arrange(., desc(count_numeric))
+      } %>%
+      slice_head(n = top_n)
+  } else {
+    df <- df %>%
+      group_by(.data[[cluster_col]]) %>%
+      {
+        if (order_by == "p") arrange(., p_value_plot, .by_group = TRUE)
+        else if (order_by == "gene_ratio") arrange(., desc(gene_ratio_numeric), .by_group = TRUE)
+        else arrange(., desc(count_numeric), .by_group = TRUE)
+      } %>%
+      slice_head(n = top_n) %>%
+      ungroup()
+  }
+
+ 
+  df <- df %>%
+  mutate(
+    description_original = as.character(.data[[description_col]])
+  ) %>%
+  arrange(gene_ratio_numeric) %>%
+  mutate(
+    term_id = paste0("term_", seq_len(n())),
+    term_id = factor(term_id, levels = term_id)
+  )
+
+label_lookup <- setNames(df$description_original, df$term_id)
+
+label_function <- function(x) {
+  labs <- unname(label_lookup[as.character(x)])
+
+  if (label_mode == "truncate") {
+    stringr::str_trunc(labs, width = label_width)
+  } else if (label_mode == "wrap") {
+    hard_wrap_label(
+      labs,
+      width = label_width,
+      replace_underscores = TRUE
+    )
+  } else {
+    labs
+  }
+}
+
+  colour_var <- if (show_p_as == "minus_log10") {
+    "minus_log10_p"
+  } else {
+    "p_value_plot"
+  }
+
+  colour_label <- if (show_p_as == "minus_log10") {
+    paste0("-log10(", p_col, ")")
+  } else {
+    p_col
+  }
+
+  p <- ggplot(
+    df,
+    aes(
+      x = gene_ratio_numeric,
+      y = term_id,
+      size = count_numeric,
+      colour = .data[[colour_var]]
+    )
+  ) +
+    geom_point(alpha = 0.9) +
+    scale_y_discrete(labels = label_function) +
+    scale_size_continuous(
+    name = "Gene count",
+    range = dot_size_range,
+    guide = guide_legend(
+    order = 2,
+    direction = "vertical",
+    title.position = "top",
+    label.position = "right",
+    ncol = 1,
+    byrow = TRUE,
+      override.aes = list(colour = "grey30")
+    )
+  ) +
+    labs(
+      title = title,
+      x = "Gene ratio",
+      y = NULL,
+      colour = colour_label
+    ) +
+    theme_bw(base_size = 12) +
+    theme(
+     panel.grid.major.y = element_line(linewidth = 0.25, colour = "grey85"),
+      panel.grid.major.x = element_line(linewidth = 0.25, colour = "grey90"),
+      panel.grid.minor = element_blank(),
+
+     axis.text.y = element_text(
+       size = y_label_size,
+        hjust = 1,
+        lineheight = y_label_lineheight
+      ),
+      axis.text.x = element_text(size = x_label_size),
+
+      plot.title = element_text(face = "bold"),
+
+     legend.position = "right",
+     legend.box = "vertical",
+     legend.direction = "vertical",
+     legend.title = element_text(size = legend_title_size),
+     legend.text = element_text(size = legend_text_size),
+
+     plot.margin = margin(6, 6, 6, 6)
+)
+
+if (show_p_as == "raw") {
+  p <- p +
+    viridis::scale_colour_viridis(
+      option = colour_scheme,
+      direction = -colour_direction,
+      trans = "reverse",
+      name = colour_label,
+      guide = guide_colourbar(
+        order = 1,
+        direction = "vertical",
+        title.position = "top",
+        label.position = "right",
+        barheight = unit(35, "mm"),
+        barwidth = unit(4, "mm")
+      )
+    )
+} else {
+  p <- p +
+    viridis::scale_colour_viridis(
+      option = colour_scheme,
+      direction = colour_direction,
+      name = colour_label,
+      guide = guide_colourbar(
+        order = 1,
+        direction = "vertical",
+        title.position = "top",
+        label.position = "right",
+        barheight = unit(35, "mm"),
+        barwidth = unit(4, "mm")
+      )
+    )
+}
+
+  if (!is.null(cluster_col)) {
+    p <- p +
+      facet_wrap(
+        vars(.data[[cluster_col]]),
+        scales = "free_y"
+      )
+  }
+
+  fixed_plot <- set_fixed_panel_size(
+    p,
+    panel_width = panel_width_cm,
+    panel_height = panel_height_cm,
+    left_axis_width = left_axis_width_cm,
+    unit = "cm"
+  )
+
+  if (save_plot) {
+    ggsave(
+      filename = filename,
+      plot = fixed_plot,
+      width = device_width,
+      height = device_height,
+      units = "in",
+      limitsize = FALSE
+    )
+  }
+
+  return(fixed_plot)
+}
+
+```
+
+```{r Visualise enrichment results}
+
+enrich_df <- enrich_results@result
+
+p_fixed <- plot_enrich_dotplot_fixed_panel(
+  enrich_df,
+  top_n = 20,
+  p_col = "p.adjust",
+  show_p_as = "raw",
+  label_mode = "wrap",
+  label_width = 30,
+
+  # actual grid size
+  panel_width_cm = 6,
+  panel_height_cm = 10,
+
+  # saved file size
+  save_plot = TRUE,
+  filename = "GSEA_CM_XYZ.png",
+  device_width = 10,
+  device_height = 8,
+  left_axis_width_cm = 1,
+  colour_scheme = "viridis",
+  title = "GSEA_CM_XYZ",
+  order_by = "p",
+  y_label_size = 7,
+  y_label_lineheight = 0.8,
+
+) 
+
+
+grid::grid.newpage()
+
+grid::grid.draw(p_fixed) 
+
+
+```
+
+```{r Monocle pseudotime trajectory}
+#Transform CM Seurat object into the Cell Data Set object
+cds <- as.cell_data_set(CM)
+umap_coords <-Embeddings(CM, "umap.rpca")
+reducedDims(cds)$UMAP <- umap_coords
+cds <- cluster_cells(cds)
+
+plot_cells(cds, color_cells_by = "partition")
+cds <- learn_graph(cds)
+cds<- order_cells(cds)
+
+plot_cells(cds, color_cells_by = "pseudotime", label_branch_points = F, label_leaves = F, trajectory_graph_color = "black", cell_size = 0.5) +   scale_color_viridis(discrete = FALSE, option = "C")
+rowData(cds)$gene_name <- rownames(cds)
+rowData(cds)$gene_short_name <- rowData(cds)$gene_name
+
+cds_subset <- choose_cells(cds) # select the nodes connecting CM_1 and CM_3
+cds_test <- graph_test(cds_subset, neighbor_graph = "principal_graph", cores = 4)
+head(cds_test)
+write.csv(cds_test, file = "CM_DEG_trajectory_monocle3.csv", row.names = T)
+
+cds_genes <- cds_test %>%
+    filter(p_value < 0.01) %>%
+    arrange(desc(morans_test_statistic)) %>%
+    top_n(n = 500, wt = morans_test_statistic)
+
+plot_cells(cds, genes = c("Top2a", "Mki67", "Pvt1", "Anln"), label_branch_points = F, label_leaves = F, trajectory_graph_color = "black", cell_size = 0.5)
+
+```
+
+
+
+```
+
