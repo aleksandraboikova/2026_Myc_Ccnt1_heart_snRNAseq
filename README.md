@@ -14,4 +14,4 @@ All sequencing datasets generated and used in this study, have been deposited in
 
 Citation:
 
-
+Boikova, A., Quaife-Ryan, G.A., Batho, C.A.P. et al. A transient modified mRNA encoding Myc and cyclin T1 improves cardiac function after myocardial injury. Nat Cardiovasc Res (2026). https://doi.org/10.1038/s44161-026-00910-7
